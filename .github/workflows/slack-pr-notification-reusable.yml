@@ -23,6 +23,7 @@ on:
         required: true
 
 permissions:
+  checks: read           # needed by wait_for_ci to query check-runs API
   contents: read
   pull-requests: write   # create/read PR comment with Slack message timestamp
 
