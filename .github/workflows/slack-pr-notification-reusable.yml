@@ -345,10 +345,20 @@ jobs:
           echo "ts=$TS" >> "$GITHUB_OUTPUT"
           echo "found=true" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve merged_by with fallback
+        id: resolve_merged_by
+        run: |
+          MERGED_BY="${{ github.event.pull_request.merged_by.login }}"
+          if [ -z "$MERGED_BY" ] || [ "$MERGED_BY" = "null" ]; then
+            MERGED_BY="API/automation"
+          fi
+          echo "login=$MERGED_BY" >> "$GITHUB_OUTPUT"
+
       - name: Update Slack message
         if: steps.find_ts.outputs.found == 'true'
         run: |
           CHANNEL="${{ inputs.slack_channel_id }}"
+          MERGED_BY="${{ steps.resolve_merged_by.outputs.login }}"
           curl -s -X POST \
             -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
             -H "Content-Type: application/json" \
@@ -356,7 +366,7 @@ jobs:
               --arg channel "$CHANNEL" \
               --arg ts "${{ steps.find_ts.outputs.ts }}" \
               --arg author "${{ github.event.pull_request.user.login }}" \
-              --arg merged_by "${{ github.event.pull_request.merged_by.login }}" \
+              --arg merged_by "$MERGED_BY" \
               --arg title "${{ github.event.pull_request.title }}" \
               --arg branch "${{ github.event.pull_request.head.ref }}" \
               --arg url "${{ github.event.pull_request.html_url }}" \
