@@ -1,0 +1,538 @@
+name: Slack PR Review Notifications (reusable)
+
+# Reusable workflow: post and update Slack messages on PR events.
+# Callers must pass slack_channel_id and SLACK_BOT_TOKEN. CI wait is opt-in (enable_wait_for_ci + required_checks).
+
+on:
+  workflow_call:
+    inputs:
+      slack_channel_id:
+        description: 'Slack channel ID (e.g. C09HB1Q3J69)'
+        required: true
+        type: string
+      required_checks:
+        description: 'Comma-separated CI check names to wait for (only used when enable_wait_for_ci is true)'
+        required: false
+        type: string
+      enable_wait_for_ci:
+        description: 'Set to true to wait for CI checks to pass before posting; if false or omitted, post immediately'
+        required: false
+        type: boolean
+    secrets:
+      SLACK_BOT_TOKEN:
+        required: true
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # Gate: Wait for CI checks (opt-in; skip if disabled or required_checks empty)
+  # ──────────────────────────────────────────────────────────────
+  wait_for_ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for CI checks to pass
+        run: |
+          ENABLE_WAIT="${{ inputs.enable_wait_for_ci }}"
+          if [ "$ENABLE_WAIT" != "true" ]; then
+            echo "CI wait disabled or not set, continuing"
+            exit 0
+          fi
+          REQUIRED_CHECKS_STR="${{ inputs.required_checks }}"
+          REQUIRED_CHECKS_STR=$(echo "$REQUIRED_CHECKS_STR" | xargs)
+          if [ -z "$REQUIRED_CHECKS_STR" ]; then
+            echo "No checks configured, continuing"
+            exit 0
+          fi
+          IFS=',' read -ra REQUIRED_CHECKS <<< "$REQUIRED_CHECKS_STR"
+          SHA="${{ github.event.pull_request.head.sha }}"
+          MAX_ATTEMPTS=20
+          SLEEP_SECONDS=30
+          API_BASE="${GITHUB_API_URL:-https://api.github.com}"
+
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            ALL_PASSED=true
+            for check in "${REQUIRED_CHECKS[@]}"; do
+              check=$(echo "$check" | xargs)
+              [ -z "$check" ] && continue
+              STATUS=$(curl -s \
+                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github+json" \
+                "$API_BASE/repos/${{ github.repository }}/commits/$SHA/check-runs" \
+                | jq -r --arg chk "$check" '.check_runs[] | select(.name == $chk) | .conclusion' \
+                | head -1)
+
+              if [ "$STATUS" = "failure" ]; then
+                echo "Check '$check' failed, aborting"
+                exit 1
+              fi
+              if [ "$STATUS" != "success" ]; then
+                ALL_PASSED=false
+              fi
+            done
+
+            if [ "$ALL_PASSED" = "true" ]; then
+              echo "All CI checks passed"
+              exit 0
+            fi
+
+            echo "Attempt $attempt/$MAX_ATTEMPTS: waiting ${SLEEP_SECONDS}s..."
+            sleep $SLEEP_SECONDS
+          done
+
+          echo "Timed out waiting for CI checks"
+          exit 1
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 1: Post initial Slack message when PR is ready for review
+  # ──────────────────────────────────────────────────────────────
+  notify_review_ready:
+    needs: wait_for_ci
+    if: >-
+      (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'ready_for_review')
+      && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for existing Slack message timestamp
+        id: find_ts
+        run: |
+          API_BASE="${GITHUB_API_URL:-https://api.github.com}"
+          REPO="${{ github.repository }}"
+          ISSUE="${{ github.event.pull_request.number }}"
+          page=1
+          max_page=10
+          TS=""
+          while [ $page -le $max_page ]; do
+            COMMENTS=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "$API_BASE/repos/$REPO/issues/$ISSUE/comments?per_page=100&page=$page")
+            count=$(echo "$COMMENTS" | jq -r 'length')
+            [ "$count" -eq 0 ] && break
+            TS=$(echo "$COMMENTS" | jq -r '[.[] | select(.user.login == "github-actions[bot]") | select(.body | test("<!-- slack-review-ts:")) | .body] | first' \
+              | grep -oP '(?<=<!-- slack-review-ts:)[^ ]+(?= -->)' || true)
+            [ -n "$TS" ] && break
+            page=$((page + 1))
+          done
+          if [ -z "$TS" ] || [ "$TS" = "null" ]; then
+            echo "No existing Slack message found, will post new"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Found existing Slack message ts=$TS, will update"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "ts=$TS" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post or update Slack message
+        id: slack
+        run: |
+          EXISTING_TS="${{ steps.find_ts.outputs.ts }}"
+          HAS_EXISTING="${{ steps.find_ts.outputs.found }}"
+          CHANNEL="${{ inputs.slack_channel_id }}"
+
+          PAYLOAD=$(jq -n \
+            --arg channel "$CHANNEL" \
+            --arg author "${{ github.event.pull_request.user.login }}" \
+            --arg title "${{ github.event.pull_request.title }}" \
+            --arg branch "${{ github.event.pull_request.head.ref }}" \
+            --arg url "${{ github.event.pull_request.html_url }}" \
+            '{
+              "channel": $channel,
+              "attachments": [
+                {
+                  "color": "#1E90FF",
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": ":eyes: *Code Review Requested*"
+                      }
+                    },
+                    {
+                      "type": "section",
+                      "fields": [
+                        { "type": "mrkdwn", "text": ("*Author:* " + $author) },
+                        { "type": "mrkdwn", "text": ("*Branch:* `" + $branch + "`") }
+                      ]
+                    },
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": ("*PR:* <" + $url + "|" + $title + ">")
+                      }
+                    }
+                  ]
+                }
+              ]
+            }')
+
+          if [ "$HAS_EXISTING" = "true" ]; then
+            PAYLOAD=$(echo "$PAYLOAD" | jq --arg ts "$EXISTING_TS" '. + {ts: $ts}')
+            API_URL="https://slack.com/api/chat.update"
+          else
+            API_URL="https://slack.com/api/chat.postMessage"
+          fi
+
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD" \
+            "$API_URL")
+
+          OK=$(echo "$RESPONSE" | jq -r '.ok')
+          if [ "$OK" != "true" ]; then
+            echo "Slack API error: $(echo "$RESPONSE" | jq -r '.error // .')"
+            exit 1
+          fi
+
+          TS=$(echo "$RESPONSE" | jq -r '.ts')
+          echo "ts=$TS" >> "$GITHUB_OUTPUT"
+          echo "is_new=$( [ "$HAS_EXISTING" = "true" ] && echo false || echo true )" >> "$GITHUB_OUTPUT"
+
+      - name: Save Slack message timestamp as PR comment
+        if: steps.slack.outputs.is_new == 'true'
+        run: |
+          API_BASE="${GITHUB_API_URL:-https://api.github.com}"
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_BASE/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            -d "$(jq -n --arg body "<!-- slack-review-ts:${{ steps.slack.outputs.ts }} -->" '{body: $body}')"
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 2: Update Slack message when changes are requested
+  # ──────────────────────────────────────────────────────────────
+  notify_changes_requested:
+    needs: wait_for_ci
+    if: >-
+      github.event_name == 'pull_request_review'
+      && github.event.review.state == 'changes_requested'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find Slack message timestamp
+        id: find_ts
+        run: |
+          API_BASE="${GITHUB_API_URL:-https://api.github.com}"
+          REPO="${{ github.repository }}"
+          ISSUE="${{ github.event.pull_request.number }}"
+          page=1
+          max_page=10
+          TS=""
+          while [ $page -le $max_page ]; do
+            COMMENTS=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "$API_BASE/repos/$REPO/issues/$ISSUE/comments?per_page=100&page=$page")
+            count=$(echo "$COMMENTS" | jq -r 'length')
+            [ "$count" -eq 0 ] && break
+            TS=$(echo "$COMMENTS" | jq -r '[.[] | select(.user.login == "github-actions[bot]") | select(.body | test("<!-- slack-review-ts:")) | .body] | first' \
+              | grep -oP '(?<=<!-- slack-review-ts:)[^ ]+(?= -->)' || true)
+            [ -n "$TS" ] && break
+            page=$((page + 1))
+          done
+          if [ -z "$TS" ]; then
+            echo "No Slack message timestamp found, skipping update"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ts=$TS" >> "$GITHUB_OUTPUT"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update Slack message
+        if: steps.find_ts.outputs.found == 'true'
+        run: |
+          CHANNEL="${{ inputs.slack_channel_id }}"
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -n \
+              --arg channel "$CHANNEL" \
+              --arg ts "${{ steps.find_ts.outputs.ts }}" \
+              --arg author "${{ github.event.pull_request.user.login }}" \
+              --arg reviewer "${{ github.event.review.user.login }}" \
+              --arg title "${{ github.event.pull_request.title }}" \
+              --arg branch "${{ github.event.pull_request.head.ref }}" \
+              --arg url "${{ github.event.pull_request.html_url }}" \
+              '{
+                "channel": $channel,
+                "ts": $ts,
+                "attachments": [
+                  {
+                    "color": "#FFA500",
+                    "blocks": [
+                      {
+                        "type": "section",
+                        "text": {
+                          "type": "mrkdwn",
+                          "text": ":warning: *Changes Requested*"
+                        }
+                      },
+                      {
+                        "type": "section",
+                        "fields": [
+                          { "type": "mrkdwn", "text": ("*Author:* " + $author) },
+                          { "type": "mrkdwn", "text": ("*Reviewer:* " + $reviewer) }
+                        ]
+                      },
+                      {
+                        "type": "section",
+                        "fields": [
+                          { "type": "mrkdwn", "text": ("*Branch:* `" + $branch + "`") }
+                        ]
+                      },
+                      {
+                        "type": "section",
+                        "text": {
+                          "type": "mrkdwn",
+                          "text": ("*PR:* <" + $url + "|" + $title + ">")
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }')" \
+            "https://slack.com/api/chat.update"
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 3: Update Slack message when PR is merged
+  # ──────────────────────────────────────────────────────────────
+  notify_merged:
+    needs: wait_for_ci
+    if: >-
+      github.event.action == 'closed'
+      && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find Slack message timestamp
+        id: find_ts
+        run: |
+          API_BASE="${GITHUB_API_URL:-https://api.github.com}"
+          REPO="${{ github.repository }}"
+          ISSUE="${{ github.event.pull_request.number }}"
+          page=1
+          max_page=10
+          TS=""
+          while [ $page -le $max_page ]; do
+            COMMENTS=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "$API_BASE/repos/$REPO/issues/$ISSUE/comments?per_page=100&page=$page")
+            count=$(echo "$COMMENTS" | jq -r 'length')
+            [ "$count" -eq 0 ] && break
+            TS=$(echo "$COMMENTS" | jq -r '[.[] | select(.user.login == "github-actions[bot]") | select(.body | test("<!-- slack-review-ts:")) | .body] | first' \
+              | grep -oP '(?<=<!-- slack-review-ts:)[^ ]+(?= -->)' || true)
+            [ -n "$TS" ] && break
+            page=$((page + 1))
+          done
+          if [ -z "$TS" ]; then
+            echo "No Slack message timestamp found, skipping update"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ts=$TS" >> "$GITHUB_OUTPUT"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update Slack message
+        if: steps.find_ts.outputs.found == 'true'
+        run: |
+          CHANNEL="${{ inputs.slack_channel_id }}"
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -n \
+              --arg channel "$CHANNEL" \
+              --arg ts "${{ steps.find_ts.outputs.ts }}" \
+              --arg author "${{ github.event.pull_request.user.login }}" \
+              --arg merged_by "${{ github.event.pull_request.merged_by.login }}" \
+              --arg title "${{ github.event.pull_request.title }}" \
+              --arg branch "${{ github.event.pull_request.head.ref }}" \
+              --arg url "${{ github.event.pull_request.html_url }}" \
+              '{
+                "channel": $channel,
+                "ts": $ts,
+                "attachments": [
+                  {
+                    "color": "#36a64f",
+                    "blocks": [
+                      {
+                        "type": "section",
+                        "text": {
+                          "type": "mrkdwn",
+                          "text": ":white_check_mark: *Merged*"
+                        }
+                      },
+                      {
+                        "type": "section",
+                        "fields": [
+                          { "type": "mrkdwn", "text": ("*Author:* " + $author) },
+                          { "type": "mrkdwn", "text": ("*Merged by:* " + $merged_by) }
+                        ]
+                      },
+                      {
+                        "type": "section",
+                        "fields": [
+                          { "type": "mrkdwn", "text": ("*Branch:* `" + $branch + "`") }
+                        ]
+                      },
+                      {
+                        "type": "section",
+                        "text": {
+                          "type": "mrkdwn",
+                          "text": ("*PR:* <" + $url + "|" + $title + ">")
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }')" \
+            "https://slack.com/api/chat.update"
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 4: Update Slack message when PR is closed without merging
+  # ──────────────────────────────────────────────────────────────
+  notify_closed:
+    needs: wait_for_ci
+    if: >-
+      github.event.action == 'closed'
+      && github.event.pull_request.merged == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find Slack message timestamp
+        id: find_ts
+        run: |
+          API_BASE="${GITHUB_API_URL:-https://api.github.com}"
+          REPO="${{ github.repository }}"
+          ISSUE="${{ github.event.pull_request.number }}"
+          page=1
+          max_page=10
+          TS=""
+          while [ $page -le $max_page ]; do
+            COMMENTS=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "$API_BASE/repos/$REPO/issues/$ISSUE/comments?per_page=100&page=$page")
+            count=$(echo "$COMMENTS" | jq -r 'length')
+            [ "$count" -eq 0 ] && break
+            TS=$(echo "$COMMENTS" | jq -r '[.[] | select(.user.login == "github-actions[bot]") | select(.body | test("<!-- slack-review-ts:")) | .body] | first' \
+              | grep -oP '(?<=<!-- slack-review-ts:)[^ ]+(?= -->)' || true)
+            [ -n "$TS" ] && break
+            page=$((page + 1))
+          done
+          if [ -z "$TS" ]; then
+            echo "No Slack message timestamp found, skipping update"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ts=$TS" >> "$GITHUB_OUTPUT"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update Slack message
+        if: steps.find_ts.outputs.found == 'true'
+        run: |
+          CHANNEL="${{ inputs.slack_channel_id }}"
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -n \
+              --arg channel "$CHANNEL" \
+              --arg ts "${{ steps.find_ts.outputs.ts }}" \
+              --arg author "${{ github.event.pull_request.user.login }}" \
+              --arg title "${{ github.event.pull_request.title }}" \
+              --arg branch "${{ github.event.pull_request.head.ref }}" \
+              --arg url "${{ github.event.pull_request.html_url }}" \
+              '{
+                "channel": $channel,
+                "ts": $ts,
+                "attachments": [
+                  {
+                    "color": "#FF0000",
+                    "blocks": [
+                      {
+                        "type": "section",
+                        "text": {
+                          "type": "mrkdwn",
+                          "text": ":no_entry_sign: *Closed*"
+                        }
+                      },
+                      {
+                        "type": "section",
+                        "fields": [
+                          { "type": "mrkdwn", "text": ("*Author:* " + $author) },
+                          { "type": "mrkdwn", "text": ("*Branch:* `" + $branch + "`") }
+                        ]
+                      },
+                      {
+                        "type": "section",
+                        "text": {
+                          "type": "mrkdwn",
+                          "text": ("*PR:* <" + $url + "|" + $title + ">")
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }')" \
+            "https://slack.com/api/chat.update"
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 5: Delete Slack message when PR is converted to draft
+  # ──────────────────────────────────────────────────────────────
+  notify_converted_to_draft:
+    needs: wait_for_ci
+    if: github.event.action == 'converted_to_draft'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find Slack message timestamp and comment ID
+        id: find_ts
+        run: |
+          API_BASE="${GITHUB_API_URL:-https://api.github.com}"
+          REPO="${{ github.repository }}"
+          ISSUE="${{ github.event.pull_request.number }}"
+          page=1
+          max_page=10
+          MATCH=""
+          while [ $page -le $max_page ]; do
+            COMMENTS=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "$API_BASE/repos/$REPO/issues/$ISSUE/comments?per_page=100&page=$page")
+            count=$(echo "$COMMENTS" | jq -r 'length')
+            [ "$count" -eq 0 ] && break
+            MATCH=$(echo "$COMMENTS" | jq -r '[.[] | select(.user.login == "github-actions[bot]") | select(.body | test("<!-- slack-review-ts:"))] | first')
+            if [ "$MATCH" != "null" ] && [ -n "$MATCH" ]; then
+              break
+            fi
+            page=$((page + 1))
+          done
+          if [ "$MATCH" = "null" ] || [ -z "$MATCH" ]; then
+            echo "No Slack message timestamp found, skipping"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TS=$(echo "$MATCH" | jq -r '.body' | grep -oP '(?<=<!-- slack-review-ts:)[^ ]+(?= -->)' || true)
+          COMMENT_ID=$(echo "$MATCH" | jq -r '.id')
+          echo "ts=$TS" >> "$GITHUB_OUTPUT"
+          echo "comment_id=$COMMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Delete Slack message
+        if: steps.find_ts.outputs.found == 'true'
+        run: |
+          CHANNEL="${{ inputs.slack_channel_id }}"
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -n \
+              --arg channel "$CHANNEL" \
+              --arg ts "${{ steps.find_ts.outputs.ts }}" \
+              '{channel: $channel, ts: $ts}')" \
+            "https://slack.com/api/chat.delete"
+
+      - name: Delete PR comment with stale timestamp
+        if: steps.find_ts.outputs.found == 'true'
+        run: |
+          API_BASE="${GITHUB_API_URL:-https://api.github.com}"
+          curl -s -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_BASE/repos/${{ github.repository }}/issues/comments/${{ steps.find_ts.outputs.comment_id }}"

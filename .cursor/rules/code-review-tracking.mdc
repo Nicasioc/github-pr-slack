@@ -1,0 +1,26 @@
+---
+description: When doing a code review, create a GitHub issue to track it
+alwaysApply: true
+---
+
+# Code review → GitHub issue
+
+Whenever you perform a code review (of a PR, a patch, or a codebase area), create a **GitHub issue** to track it.
+
+## What to do
+
+1. **Create the issue** in the same repo you reviewed (or the one the user specifies).
+2. **Title**: Clear, actionable title (e.g. `Code review: [scope] – track findings` or `Follow-up from code review: [topic]`).
+3. **Body** should include:
+   - Short summary of what was reviewed.
+   - List of findings/action items (from the review), each as a distinct point or checkbox so they can be tracked and closed.
+   - If the full review lives in a file (e.g. `CODE_REVIEW.md`), link to it or paste the relevant sections.
+
+## Optional
+
+- Reference the PR or branch in the issue body if the review was PR-specific.
+- Label the issue (e.g. `code-review`, `tech-debt`) if the repo uses labels.
+
+## Rationale
+
+Tracking code review outcomes in an issue keeps findings visible and ensures they are not lost after the conversation ends.

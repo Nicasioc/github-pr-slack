@@ -1,0 +1,23 @@
+name: Slack PR Review Notifications
+
+# Thin caller: triggers on PR events and calls the reusable workflow.
+# All configuration via repository variables (Settings → Secrets and variables → Actions → Variables):
+#   SLACK_CHANNEL_ID (required), SLACK_ENABLE_WAIT_FOR_CI ('true' to wait), SLACK_REQUIRED_CHECKS (comma-separated).
+# Requires SLACK_BOT_TOKEN secret.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  notify:
+    if: vars.SLACK_CHANNEL_ID != ''
+    uses: ./.github/workflows/slack-pr-notification-reusable.yml
+    with:
+      slack_channel_id: ${{ vars.SLACK_CHANNEL_ID }}
+      enable_wait_for_ci: ${{ vars.SLACK_ENABLE_WAIT_FOR_CI == 'true' }}
+      required_checks: ${{ vars.SLACK_REQUIRED_CHECKS }}
+    secrets:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
