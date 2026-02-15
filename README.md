@@ -56,6 +56,9 @@ on:
     types: [submitted]
 jobs:
   notify:
+    permissions:
+      contents: read
+      pull-requests: write   # required to store Slack message timestamp in a PR comment
     uses: OWNER/github-pr-slack/.github/workflows/slack-pr-notification-reusable.yml@main
     with:
       slack_channel_id: 'C09HB1Q3J69'
