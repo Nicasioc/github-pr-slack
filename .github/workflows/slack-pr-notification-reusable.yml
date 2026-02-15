@@ -141,6 +141,7 @@ jobs:
             --arg url "${{ github.event.pull_request.html_url }}" \
             '{
               "channel": $channel,
+              "text": ("Code Review Requested: " + $title + " by " + $author),
               "attachments": [
                 {
                   "color": "#1E90FF",
@@ -267,6 +268,7 @@ jobs:
               '{
                 "channel": $channel,
                 "ts": $ts,
+                "text": ("Changes Requested: " + $title + " by " + $reviewer),
                 "attachments": [
                   {
                     "color": "#FFA500",
@@ -361,6 +363,7 @@ jobs:
               '{
                 "channel": $channel,
                 "ts": $ts,
+                "text": ("Merged: " + $title + " by " + $merged_by),
                 "attachments": [
                   {
                     "color": "#36a64f",
@@ -454,6 +457,7 @@ jobs:
               '{
                 "channel": $channel,
                 "ts": $ts,
+                "text": ("Closed: " + $title + " by " + $author),
                 "attachments": [
                   {
                     "color": "#FF0000",
