@@ -16,12 +16,34 @@ So the channel sees a single, up-to-date line per PR instead of multiple separat
 
 The workflow paginates through PR comments to find the hidden timestamp that links the Slack message to the PR, so it works for PRs with many comments (up to 10 pages of 100 comments).
 
+## Slack app setup
+
+Before configuring the GitHub side you need a Slack bot token and the channel ID.
+
+### 1. Create a Slack app (skip if you already have one)
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App → From scratch**.
+2. Give it a name (e.g. "PR Notifications") and pick your workspace.
+3. Under **OAuth & Permissions → Scopes → Bot Token Scopes**, add **`chat:write`**.
+4. Click **Install to Workspace** (or reinstall if you added scopes later) and authorize.
+5. Copy the **Bot User OAuth Token** (`xoxb-...`) from the OAuth & Permissions page -- this is your `SLACK_BOT_TOKEN`.
+
+### 2. Invite the bot to the channel
+
+The bot **must** be a member of the channel it posts to, otherwise the Slack API returns `not_in_channel`.
+
+- Open the target channel in Slack, then either:
+  - Type `/invite @YourBotName`, or
+  - Open **Channel settings → Integrations → Add apps** and add your bot.
+
+### 3. Find the channel ID
+
+Right-click the channel name (or open channel details) and choose **Copy link**. The ID is the last path segment (starts with `C`, e.g. `C08B0BH8R99`). You can also find it at the bottom of the **About** tab in channel details.
+
 ## Using this workflow in your repository
 
-1. **Add the `SLACK_BOT_TOKEN` secret** in your repo (Settings → Secrets and variables → Actions):
-   - Create a Slack app or use an existing bot with the `chat:write` OAuth scope.
-   - Invite the bot to the channel you want to post to.
-   - Store the Bot User OAuth Token as `SLACK_BOT_TOKEN`.
+1. **Add the `SLACK_BOT_TOKEN` secret** in your repo (Settings → Secrets and variables → Actions → **Secrets** tab).
+   Store the Bot User OAuth Token (`xoxb-...`) you copied above.
 
 2. **Create a workflow file** in your repo (e.g. `.github/workflows/slack-pr-notify.yml`) that calls this reusable workflow:
 
@@ -71,12 +93,22 @@ You can also use **repository variables** instead of literal values (e.g. `slack
 
 ### Configuring this repo (caller workflow)
 
-The caller workflow (`.github/workflows/slack-notification.yml`) reads all configuration from repository variables. Set them under Settings → Secrets and variables → Actions → Variables (no defaults; all must be set as needed):
+The caller workflow (`.github/workflows/slack-notification.yml`) reads all configuration from repository **variables** and **secrets**. Set them under Settings → Secrets and variables → Actions.
+
+> **Important:** GitHub has two separate tabs -- **Secrets** and **Variables**. The workflow uses `vars.*` for non-sensitive config and `secrets.*` for the token. Putting a value on the wrong tab will cause the job to be silently skipped or fail.
+
+**Secrets** tab (Settings → Secrets and variables → Actions → Secrets):
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `SLACK_BOT_TOKEN` | Yes | Bot User OAuth Token (`xoxb-...`) with `chat:write` scope. |
+
+**Variables** tab (Settings → Secrets and variables → Actions → Variables):
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `SLACK_CHANNEL_ID` | Yes | Slack channel ID (e.g. `C09HB1Q3J69`). |
+| `SLACK_CHANNEL_ID` | Yes | Slack channel ID (e.g. `C08B0BH8R99`). |
 | `SLACK_ENABLE_WAIT_FOR_CI` | No | Set to `true` to wait for CI before posting; omit or set to anything else to post immediately. |
 | `SLACK_REQUIRED_CHECKS` | No | Comma-separated CI check names when `SLACK_ENABLE_WAIT_FOR_CI` is `true`. Omit or leave empty to continue without waiting for checks. |
 
-If `SLACK_CHANNEL_ID` is not set, the `notify` job is skipped (no Slack API calls are made).
+If `SLACK_CHANNEL_ID` is not set (or placed in Secrets instead of Variables), the `notify` job is silently skipped.
