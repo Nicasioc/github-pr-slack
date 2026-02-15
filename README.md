@@ -112,3 +112,13 @@ The caller workflow (`.github/workflows/slack-notification.yml`) reads all confi
 | `SLACK_REQUIRED_CHECKS` | No | Comma-separated CI check names when `SLACK_ENABLE_WAIT_FOR_CI` is `true`. Omit or leave empty to continue without waiting for checks. |
 
 If `SLACK_CHANNEL_ID` is not set (or placed in Secrets instead of Variables), the `notify` job is silently skipped.
+
+### Troubleshooting
+
+**"No Slack message timestamp found, skipping update"** (e.g. when closing a PR)
+
+The workflow stores the Slack message timestamp in a **hidden PR comment** (`<!-- slack-review-ts:... -->`) so it can update the same message on later events (review, merge, close). If that comment was never created, the workflow can't find the message and skips the update.
+
+- **Check the run** that first posted the Slack message (e.g. when the PR was opened). Look for the step **"Save Slack message timestamp as PR comment"**. If it **failed**, the run will show an error (e.g. missing permission). If it was **skipped**, the workflow thought it was updating an existing message (`is_new` was false) instead of posting a new one.
+- **Permissions:** The workflow needs `pull-requests: write` so it can create the comment. The reusable workflow and the caller both declare this; if you use a custom caller, add `permissions: pull-requests: write` (or `issues: write`) to the job that calls the reusable workflow.
+- **One-time fix:** For a PR that already has a Slack message but no comment, you can re-trigger the workflow (e.g. reopen and close again) only after the permission fix is in place so the next "open" run creates the comment.

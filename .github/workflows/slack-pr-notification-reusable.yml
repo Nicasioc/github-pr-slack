@@ -22,6 +22,10 @@ on:
       SLACK_BOT_TOKEN:
         required: true
 
+permissions:
+  contents: read
+  pull-requests: write   # create/read PR comment with Slack message timestamp
+
 jobs:
   # ──────────────────────────────────────────────────────────────
   # Gate: Wait for CI checks (opt-in; skip if disabled or required_checks empty)
@@ -193,11 +197,17 @@ jobs:
         if: steps.slack.outputs.is_new == 'true'
         run: |
           API_BASE="${GITHUB_API_URL:-https://api.github.com}"
-          curl -s -X POST \
+          resp=$(curl -sS -w "\n%{http_code}" -X POST \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "$API_BASE/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
-            -d "$(jq -n --arg body "<!-- slack-review-ts:${{ steps.slack.outputs.ts }} -->" '{body: $body}')"
+            -d "$(jq -n --arg body "<!-- slack-review-ts:${{ steps.slack.outputs.ts }} -->" '{body: $body}')")
+          code=$(echo "$resp" | tail -n1)
+          if [ "$code" != "201" ]; then
+            echo "Failed to create PR comment (HTTP $code). Ensure the workflow has pull-requests: write (or issues: write)."
+            exit 1
+          fi
+          echo "Slack message timestamp saved as PR comment."
 
   # ──────────────────────────────────────────────────────────────
   # Job 2: Update Slack message when changes are requested

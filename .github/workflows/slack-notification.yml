@@ -14,6 +14,9 @@ on:
 jobs:
   notify:
     if: vars.SLACK_CHANNEL_ID != ''
+    permissions:
+      contents: read
+      pull-requests: write   # needed to create the hidden comment with Slack message timestamp
     uses: ./.github/workflows/slack-pr-notification-reusable.yml
     with:
       slack_channel_id: ${{ vars.SLACK_CHANNEL_ID }}
