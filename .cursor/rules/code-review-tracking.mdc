@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Code review → GitHub issue
 
-Whenever you perform a code review (of a PR, a patch, or a codebase area), create a **GitHub issue** to track it.
+Whenever you perform a code review (of a PR, a patch, or a codebase area), create a **GitHub issue** (https://github.com/Nicasioc/github-pr-slack/issues) to track it.
 
 ## What to do
 
