@@ -15,6 +15,7 @@ jobs:
   notify:
     if: vars.SLACK_CHANNEL_ID != ''
     permissions:
+      checks: read           # needed by wait_for_ci to query check-runs API
       contents: read
       pull-requests: write   # needed to create the hidden comment with Slack message timestamp
     uses: ./.github/workflows/slack-pr-notification-reusable.yml
